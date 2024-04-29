@@ -1,0 +1,81 @@
+name: Client CI/CD
+
+trigger:
+  branches:
+    exclude:
+      - '*' # Exclude all branches
+    include:
+      - main # Include main branch
+      - feature/* # Include feature branches
+
+# If you are running a self-hosted agent
+# pool:
+#   name: '<name of the agent pool>'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  tag: '$(Build.SourceBranchName)-$(Build.BuildId)'
+
+stages:
+- stage: Compliance
+  jobs:
+  - job: Audit
+    displayName: 'Check for security vulnerabilities with "npm audit"'
+    steps:
+    - script: |
+        npm audit
+  - job: TruffleHog
+    displayName: 'Check for secrets with TruffleHog'
+    steps:
+    - script: |
+        docker run --rm -v "$(pwd)":/tmp ghcr.io/trufflesecurity/trufflehog:latest --only-verified --fail --no-update git file:///tmp/
+    
+- stage: Development
+  condition: and(succeeded(), ne(variables['Build.SourceBranchName'], 'main'))
+  jobs:
+  - deployment: Build_and_Publish
+    displayName: 'Build and Publish'
+    environment: 'Development'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+          - task: Docker@1
+            displayName: 'Build an image'
+            inputs:
+              dockerFile: 'client/Dockerfile'
+              imageName: '$(Build.Repository.Name):$(tag)'
+              azureContainerRegistry: '<name of the Azure Container Registry>'
+              azureSubscriptionEndpoint: '<name of the Azure subscription endpoint>'
+
+          - task: Docker@1
+            displayName: 'Push an image'
+            inputs:
+              azureSubscriptionEndpoint: '<name of the Azure subscription endpoint>'
+              azureContainerRegistry: '<name of the Azure Container Registry>'
+              command: 'Push an image'
+              imageName: '$(Build.Repository.Name):$(tag)'
+
+          - task: AzureCLI@2
+            displayName: 'Update the container app with the new image'
+            inputs:
+              azureSubscription: '<name of the Azure subscription>'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                OUTPUT=$(az containerapp show -n <name of the container app> -g <name of the resource group> --query "properties.configuration.ingress.fqdn")
+                OUTPUT="${OUTPUT%\"}"
+                OUTPUT="${OUTPUT#\"}"
+                OUTPUT=https://${OUTPUT}/api/auth
+                
+                az containerapp update \
+                  --name <name of the container app> \
+                  --resource-group <name of the resource group> \
+                  --image '<azure container registry namespace>/$(Build.Repository.Name):$(tag)' \
+                  --set-env-vars "NEXTAUTH_URL=$OUTPUT"
+
+
+    
